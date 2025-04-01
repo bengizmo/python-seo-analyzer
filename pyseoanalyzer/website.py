@@ -3,7 +3,7 @@ from urllib.parse import urlsplit
 from xml.dom import minidom
 import socket
 
-from .http import http
+from .http import http_client
 from .page import Page
 
 
@@ -50,7 +50,7 @@ class Website:
     def crawl(self):
         try:
             if self.sitemap:
-                page = http.get(self.sitemap)
+                page = http_client.get(self.sitemap)
                 if self.sitemap.endswith("xml"):
                     xmldoc = minidom.parseString(page.data.decode("utf-8"))
                     sitemap_urls = xmldoc.getElementsByTagName("loc")
@@ -92,5 +92,7 @@ class Website:
 
                 if not self.follow_links:
                     break
+            import traceback
+            traceback.print_exc() # Print detailed traceback
         except Exception as e:
             print(f"Error occurred during crawling: {e}")

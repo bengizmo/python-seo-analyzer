@@ -1,3 +1,4 @@
+import logging
 import asyncio
 import hashlib
 import json
@@ -12,7 +13,7 @@ from string import punctuation
 from urllib.parse import urlsplit
 from urllib3.exceptions import HTTPError
 
-from .http import http
+from .http import http_client
 from .llm_analyst import LLMSEOEnhancer
 from .stopwords import ENGLISH_STOP_WORDS
 
@@ -198,7 +199,7 @@ class Page:
                 return
 
             try:
-                page = http.get(self.url)
+                page = http_client.get(self.url)
             except HTTPError as e:
                 self.warn(f"Returned {e}")
                 return
@@ -212,19 +213,38 @@ class Page:
                 self.warn(f"Can not read {encoding}")
                 return
             else:
-                raw_html = page.data.decode(self.encoding)
+                try:
+                    raw_html = page.data.decode(self.encoding)
+                except UnicodeDecodeError:
+                    log_func = getattr(logging, 'warning', print)
+                    log_func(f"Failed to decode {self.url} with encoding {self.encoding}. Trying latin-1.")
+                    try:
+                        raw_html = page.data.decode('latin-1')
+                    except UnicodeDecodeError:
+                        log_func = getattr(logging, 'error', print)
+                        log_func(f"Failed to decode {self.url} with fallback latin-1.")
+                        raw_html = "" # Set to empty string to prevent downstream errors
 
-        self.content_hash = hashlib.sha1(raw_html.encode(self.encoding)).hexdigest()
+        if raw_html: # Only proceed if raw_html is not empty
+            self.content_hash = hashlib.sha1(raw_html.encode(self.encoding, errors='ignore')).hexdigest() # Use ignore for hash encoding
+        else:
+            self.warn(f"Could not decode HTML content for {self.url}")
+            return # Stop analysis if HTML could not be decoded
 
-        # Use trafilatura to extract metadata
-        metadata = trafilatura.extract_metadata(
-            filecontent=raw_html,
-            default_url=self.url,
-            extensive=True,
-        )
+        # Use trafilatura to extract metadata (with error handling)
+        try:
+            metadata_obj = trafilatura.extract_metadata(
+                filecontent=raw_html,
+                default_url=self.url,
+                extensive=True,
+            )
+            # Ensure metadata is always a dict, even if extraction returns None
+            metadata = metadata_obj.as_dict() if metadata_obj else {}
+        except Exception as meta_exc:
 
-        # I want to grab values from this even if they don't exist
-        metadata = metadata.as_dict() if metadata else {}
+            log_func = getattr(logging, 'error', print)
+            log_func(f"Error during metadata extraction for {self.url}: {meta_exc}")
+            metadata = {} # Ensure metadata is an empty dict on error
 
         self.title = metadata.get("title", "")
         self.author = metadata.get("author", "")
@@ -239,17 +259,22 @@ class Page:
                 f"Keywords should be avoided as they are a spam indicator and no longer used by Search Engines"
             )
 
-        # use trafulatura to extract the content
-        content = trafilatura.extract(
-            raw_html,
-            include_links=True,
-            include_formatting=False,
-            include_tables=True,
-            include_images=True,
-            output_format="json",
-        )
+        # use trafilatura to extract the content (with error handling)
+        try:
+            content_json_str = trafilatura.extract(
+                raw_html,
+                include_links=True,
+                include_formatting=False,
+                include_tables=True,
+                include_images=True,
+                output_format="json",
+            )
+            self.content = json.loads(content_json_str) if content_json_str else None
+        except Exception as content_exc:
 
-        self.content = json.loads(content) if content else None
+            log_func = getattr(logging, 'error', print)
+            log_func(f"Error during content extraction/parsing for {self.url}: {content_exc}")
+            self.content = None # Ensure content is None on error
 
         # remove comments, they screw with BeautifulSoup
         html_without_comments = re.sub(r"<!--.*?-->", r"", raw_html, flags=re.DOTALL)
@@ -258,10 +283,44 @@ class Page:
         soup_lower = BeautifulSoup(html_without_comments.lower(), "html.parser")
         soup_unmodified = BeautifulSoup(html_without_comments, "html.parser")
 
-        self.process_text(self.content["text"])
+        # Ensure content text exists and is a string before processing
+        page_text_to_process = self.content.get("text") if self.content else None
+        if page_text_to_process and isinstance(page_text_to_process, str):
+            try: # Add try block around process_text call
+                self.process_text(page_text_to_process)
+            except Exception as text_proc_e:
+                # Use logger if available, otherwise print
+                log_func = getattr(logging, 'error', print)
+                log_func(f"Error during text processing for {self.url}: {text_proc_e}")
+                # Initialize text-based fields to avoid downstream errors
+                self.total_word_count = 0
+                self.wordcount = Counter()
+                self.bigrams = Counter()
+                self.trigrams = Counter()
+                self.keywords = {}
+        # The 'else' block below already handles the case where page_text_to_process is invalid/None
+        else:
+            # Use logger if available, otherwise print
+            log_func = getattr(logging, 'warning', print)
+            log_func(f"No valid content text found for processing URL: {self.url}")
+            # Ensure text-based fields are initialized if no text processed
+            self.total_word_count = 0
+            self.wordcount = Counter()
+            self.bigrams = Counter()
+            self.trigrams = Counter()
+            self.keywords = {}
 
-        self.analyze_title()
-        self.analyze_description()
+        # Add checks before calling analysis methods
+        if isinstance(self.title, str):
+            self.analyze_title()
+        else:
+            self.warn("Skipping title analysis due to invalid type.")
+
+        if isinstance(self.description, str):
+            self.analyze_description()
+        else:
+            self.warn("Skipping description analysis due to invalid type.")
+
         self.analyze_og(soup_lower)
         self.analyze_a_tags(soup_unmodified)
         self.analyze_img_tags(soup_lower)
@@ -284,7 +343,12 @@ class Page:
         """
 
         llm_enhancer = LLMSEOEnhancer()
-        return asyncio.run(llm_enhancer.enhance_seo_analysis(self.content))
+        try: # Add try block around asyncio.run
+            return asyncio.run(llm_enhancer.enhance_seo_analysis(self.content))
+        except Exception as llm_exc:
+            log_func = getattr(logging, 'error', print)
+            log_func(f"Error during LLM analysis for {self.url}: {llm_exc}")
+            return {} # Return empty dict on error
 
     def word_list_freq_dist(self, wordlist):
         freq = [wordlist.count(w) for w in wordlist]

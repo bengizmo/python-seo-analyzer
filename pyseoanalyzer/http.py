@@ -3,7 +3,7 @@ from urllib3 import PoolManager
 from urllib3 import Timeout
 
 
-class Http:
+class Http: # Restore class definition
     def __init__(self):
         user_agent = {"User-Agent": "Mozilla/5.0"}
 
@@ -14,8 +14,10 @@ class Http:
             headers=user_agent,
         )
 
-    def get(self, url):
-        return self.http.request("GET", url)
+    def get(self, url): # Correctly indent method
+        # Disable following redirects (Reverted)
+        return self.http.request("GET", url, redirect=False)
 
 
-http = Http()
+
+http_client = Http() # Rename instance

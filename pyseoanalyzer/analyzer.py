@@ -12,8 +12,9 @@ def analyze(
     sitemap_url=None,
     analyze_headings=False,
     analyze_extra_tags=False,
-    follow_links=True,
+    follow_links=True, # Note: This will be ignored if prefetched_markdown is used
     run_llm_analysis=False,
+    prefetched_markdown: str = None # New parameter for fallback
 ):
     start_time = time.time()
 
