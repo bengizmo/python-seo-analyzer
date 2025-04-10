@@ -33,7 +33,7 @@ class CredibilityAnalysis(BaseModel):
     credibility_assessment: str = Field(description="Overall credibility analysis")
     # Allow aliases and potentially nested dict for flexibility with LLM output
     neeat_scores: Dict[str, Union[int, Dict]] = Field(
-        description="Individual N-E-E-A-T-U component scores (or nested structure)",
+        description="Individual N-E-E-A-T-U component scores (0-100 integer)", # Added type hint
         validation_alias=AliasChoices('neeat_scores', 'N-E-E-A-T-U', 'neeat_signals')
     )
     trust_signals: List[str] = Field(description="Identified trust signals")
@@ -72,16 +72,16 @@ class LLMSEOEnhancer:
         load_dotenv(dotenv_path=dotenv_path, override=True)
         logging.debug(f"Reloaded .env file from: {dotenv_path}")
 
-        llm_provider = os.environ.get("LLM_PROVIDER", "anthropic").lower()
+        self.llm_provider = os.environ.get("LLM_PROVIDER", "anthropic").lower() # Store provider name
         llm_model = os.environ.get("LLM_MODEL") # Specific model name
         logging.debug(f"Read LLM_MODEL from env: {llm_model}") # Add debug log
         temperature = float(os.environ.get("LLM_TEMPERATURE", 0.0))
         timeout = int(os.environ.get("LLM_TIMEOUT", 60)) # Increased timeout
         max_retries = int(os.environ.get("LLM_MAX_RETRIES", 3))
 
-        logging.info(f"Initializing LLM Enhancer with provider: {llm_provider}")
+        logging.info(f"Initializing LLM Enhancer with provider: {self.llm_provider}")
 
-        if llm_provider == "anthropic":
+        if self.llm_provider == "anthropic":
             api_key = os.environ.get("ANTHROPIC_API_KEY")
             if not api_key:
                 logging.error("ANTHROPIC_API_KEY not found in environment variables.")
@@ -97,7 +97,8 @@ class LLMSEOEnhancer:
                 max_retries=max_retries,
             )
             logging.info(f"Using Anthropic model: {llm_model}")
-        elif llm_provider == "litellm":
+        elif self.llm_provider == "litellm":
+            # Note: LiteLLM might not support with_structured_output in the same way
             api_base = os.environ.get("LITELLM_API_BASE")
             api_key = os.environ.get("LITELLM_API_KEY", "nokey") # Often not needed for local proxy
             if not api_base:
@@ -113,14 +114,11 @@ class LLMSEOEnhancer:
                 temperature=temperature,
                 request_timeout=timeout, # Note: parameter name might differ
                 max_retries=max_retries,
-                # Add other necessary LiteLLM parameters if needed
             )
             logging.info(f"Using LiteLLM model: {llm_model} via base: {api_base}")
-        elif llm_provider == "ollama":
-            base_url = os.environ.get("OLLAMA_BASE_URL")
-            if not base_url:
-                logging.error("OLLAMA_BASE_URL not found in environment variables.")
-                raise ValueError("OLLAMA_BASE_URL is required for Ollama provider")
+        elif self.llm_provider == "ollama":
+            # Provide a default value for OLLAMA_BASE_URL if not set in env
+            base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
             if not llm_model:
                 logging.error("LLM_MODEL must be specified for Ollama provider (e.g., 'mistral').")
                 raise ValueError("LLM_MODEL is required for Ollama provider")
@@ -129,26 +127,14 @@ class LLMSEOEnhancer:
                 model=llm_model,
                 temperature=temperature,
                 request_timeout=120, # Increased timeout to 120 seconds
-                format="json", # Enforce JSON output format
-                # Add other necessary Ollama parameters if needed
+                # format="json", # Let with_structured_output handle format
             )
-            logging.info(f"Using Ollama model: {llm_model} via base: {base_url} with format=json") # Updated log
+            logging.info(f"Using Ollama model: {llm_model} via base: {base_url}") # Removed format=json log
         else:
-            logging.error(f"Unsupported LLM_PROVIDER: {llm_provider}. Defaulting to Anthropic.")
-            # Defaulting to Anthropic as a fallback
-            api_key = os.environ.get("ANTHROPIC_API_KEY")
-            if not api_key:
-                logging.error("ANTHROPIC_API_KEY not found in environment variables for fallback.")
-                raise ValueError("ANTHROPIC_API_KEY is required for default Anthropic provider")
-            llm_model = "claude-3-sonnet-20240229" # Default Anthropic model
-            self.llm = ChatAnthropic(
-                model=llm_model,
-                anthropic_api_key=api_key,
-                temperature=temperature,
-                timeout=timeout,
-                max_retries=max_retries,
-            )
-            logging.info(f"Defaulted to Anthropic model: {llm_model}")
+            # Raise error immediately for unsupported provider
+            error_msg = f"Unsupported LLM_PROVIDER: '{self.llm_provider}'. Supported providers: anthropic, litellm, ollama"
+            logging.error(error_msg)
+            raise ValueError(error_msg)
 
         self._setup_chains()
 
@@ -156,7 +142,6 @@ class LLMSEOEnhancer:
         """Setup modern LangChain runnable sequences using pipe syntax"""
         # Entity Analysis Chain
         entity_parser = PydanticOutputParser(pydantic_object=EntityAnalysis)
-
         entity_prompt = PromptTemplate.from_template(
             """Analyze these SEO elements for entity optimization:
             1. Entity understanding (Knowledge Panel readiness)
@@ -164,54 +149,6 @@ class LLMSEOEnhancer:
             3. Entity relationships and mentions
             4. Topic entity connections
             5. Schema markup effectiveness
-
-            Data to analyze:
-            {seo_data}
-
-            {format_instructions}
-
-            Example JSON Output:
-            ```json
-            {{
-              "conversation_readiness": "The content answers specific questions well but lacks conversational flow and follow-up prompts.",
-              "query_patterns": [
-                "how to troubleshoot X",
-                "what is Y component",
-                "best practices for Z"
-              ],
-              "engagement_score": 65,
-              "gaps": [
-                "No clear conversational entry points.",
-                "Missing links to related deeper-dive topics.",
-                "Lack of interactive elements."
-              ]
-            }}
-            ```
-
-            IMPORTANT: Your response MUST be ONLY the JSON object itself, with NO additional text, explanations, or markdown formatting like ```json before or after the JSON object. Ensure all required fields (entity_assessment, knowledge_panel_readiness, key_improvements) are present.
-            """
-        )
-
-        self.entity_chain = (
-            {
-                "seo_data": RunnablePassthrough(),
-                "format_instructions": lambda _: entity_parser.get_format_instructions(),
-            }
-            | entity_prompt
-            | self.llm
-            | entity_parser
-        )
-
-        # Credibility Analysis Chain
-        credibility_parser = PydanticOutputParser(pydantic_object=CredibilityAnalysis)
-
-        credibility_prompt = PromptTemplate.from_template(
-            """Evaluate these credibility aspects:
-            1. N-E-E-A-T-U signals
-            2. Entity understanding and validation
-            3. Content creator credentials
-            4. Publisher authority
-            5. Topic expertise signals
 
             Data to analyze:
             {seo_data}
@@ -231,30 +168,32 @@ class LLMSEOEnhancer:
             }}
             ```
 
-            IMPORTANT: Your response MUST be ONLY the JSON object itself, with NO additional text, explanations, or markdown formatting like ```json before or after the JSON object. Ensure all required fields (credibility_assessment, neeat_scores, trust_signals) are present.
+            IMPORTANT: Your response MUST be ONLY the JSON object itself, with NO additional text, explanations, or markdown formatting like ```json before or after the JSON object. Ensure all required fields (entity_assessment, knowledge_panel_readiness, key_improvements) are present.
             """
         )
-
-        self.credibility_chain = (
+        entity_base_chain = (
             {
                 "seo_data": RunnablePassthrough(),
-                "format_instructions": lambda _: credibility_parser.get_format_instructions(),
+                "format_instructions": lambda _: entity_parser.get_format_instructions(),
             }
-            | credibility_prompt
-            | self.llm
-            | credibility_parser
+            | entity_prompt
         )
+        if isinstance(self.llm, ChatOllama):
+             logging.info("Using Ollama with_structured_output for entity_chain")
+             self.entity_chain = entity_base_chain | self.llm.with_structured_output(EntityAnalysis)
+        else:
+             self.entity_chain = entity_base_chain | self.llm | entity_parser
 
-        # Conversation Analysis Chain
-        conversation_parser = PydanticOutputParser(pydantic_object=ConversationAnalysis)
 
-        conversation_prompt = PromptTemplate.from_template(
-            """Analyze content for conversational search readiness:
-            1. Query pattern matching
-            2. Intent coverage across funnel
-            3. Natural language understanding
-            4. Follow-up content availability
-            5. Conversational triggers
+        # Credibility Analysis Chain
+        credibility_parser = PydanticOutputParser(pydantic_object=CredibilityAnalysis)
+        credibility_prompt = PromptTemplate.from_template(
+            """Evaluate these credibility aspects:
+            1. N-E-E-A-T-U signals
+            2. Entity understanding and validation
+            3. Content creator credentials
+            4. Publisher authority
+            5. Topic expertise signals
 
             Data to analyze:
             {seo_data}
@@ -280,23 +219,75 @@ class LLMSEOEnhancer:
             }}
             ```
 
+            IMPORTANT: Your response MUST be ONLY the JSON object itself, with NO additional text, explanations, or markdown formatting like ```json before or after the JSON object. Ensure all required fields (credibility_assessment, neeat_scores, trust_signals) are present. The values within the `neeat_scores` dictionary MUST be integers (e.g., between 0 and 100), not descriptive strings.
+            """
+        )
+        credibility_base_chain = (
+             {
+                 "seo_data": RunnablePassthrough(),
+                 "format_instructions": lambda _: credibility_parser.get_format_instructions(),
+             }
+             | credibility_prompt
+        )
+        if isinstance(self.llm, ChatOllama):
+             logging.info("Using Ollama with_structured_output for credibility_chain")
+             self.credibility_chain = credibility_base_chain | self.llm.with_structured_output(CredibilityAnalysis)
+        else:
+             self.credibility_chain = credibility_base_chain | self.llm | credibility_parser
+
+
+        # Conversation Analysis Chain
+        conversation_parser = PydanticOutputParser(pydantic_object=ConversationAnalysis)
+        conversation_prompt = PromptTemplate.from_template(
+            """Analyze content for conversational search readiness:
+            1. Query pattern matching
+            2. Intent coverage across funnel
+            3. Natural language understanding
+            4. Follow-up content availability
+            5. Conversational triggers
+
+            Data to analyze:
+            {seo_data}
+
+            {format_instructions}
+
+            Example JSON Output:
+            ```json
+            {{
+              "conversation_readiness": "The content answers specific questions well but lacks conversational flow and follow-up prompts.",
+              "query_patterns": [
+                "how to troubleshoot X",
+                "what is Y component",
+                "best practices for Z"
+              ],
+              "engagement_score": 65,
+              "gaps": [
+                "No clear conversational entry points.",
+                "Missing links to related deeper-dive topics.",
+                "Lack of interactive elements."
+              ]
+            }}
+            ```
+
             IMPORTANT: Your response MUST be ONLY the JSON object itself, with NO additional text, explanations, or markdown formatting like ```json before or after the JSON object. Ensure all required fields (conversation_readiness, query_patterns, engagement_score, gaps) are present. Pay close attention to the field name 'gaps'.
             """
         )
-
-        self.conversation_chain = (
-            {
-                "seo_data": RunnablePassthrough(),
-                "format_instructions": lambda _: conversation_parser.get_format_instructions(),
-            }
-            | conversation_prompt
-            | self.llm
-            | conversation_parser
+        conversation_base_chain = (
+             {
+                 "seo_data": RunnablePassthrough(),
+                 "format_instructions": lambda _: conversation_parser.get_format_instructions(),
+             }
+             | conversation_prompt
         )
+        if isinstance(self.llm, ChatOllama):
+             logging.info("Using Ollama with_structured_output for conversation_chain")
+             self.conversation_chain = conversation_base_chain | self.llm.with_structured_output(ConversationAnalysis)
+        else:
+             self.conversation_chain = conversation_base_chain | self.llm | conversation_parser
+
 
         # Platform Presence Chain
         platform_parser = PydanticOutputParser(pydantic_object=PlatformPresence)
-
         platform_prompt = PromptTemplate.from_template(
             """Analyze presence across different platforms:
             1. Search engines (Google, Bing)
@@ -338,22 +329,24 @@ class LLMSEOEnhancer:
             IMPORTANT: Your response MUST be ONLY the JSON object itself, with NO additional text, explanations, or markdown formatting like ```json before or after the JSON object. Ensure all required fields (platform_coverage, visibility_scores, optimization_opportunities) are present.
             """
         )
-
-        self.platform_chain = (
-            {
-                "seo_data": RunnablePassthrough(),
-                "format_instructions": lambda _: platform_parser.get_format_instructions(),
-            }
-            | platform_prompt
-            | self.llm
-            | platform_parser
+        platform_base_chain = (
+             {
+                 "seo_data": RunnablePassthrough(),
+                 "format_instructions": lambda _: platform_parser.get_format_instructions(),
+             }
+             | platform_prompt
         )
+        if isinstance(self.llm, ChatOllama):
+             logging.info("Using Ollama with_structured_output for platform_chain")
+             self.platform_chain = platform_base_chain | self.llm.with_structured_output(PlatformPresence)
+        else:
+             self.platform_chain = platform_base_chain | self.llm | platform_parser
+
 
         # Recommendations Chain
         recommendations_parser = PydanticOutputParser(
             pydantic_object=SEORecommendations
         )
-
         recommendations_prompt = PromptTemplate.from_template(
             """Based on this complete analysis, provide strategic recommendations:
             1. Entity optimization strategy
@@ -397,83 +390,307 @@ class LLMSEOEnhancer:
             IMPORTANT: Your response MUST be ONLY the JSON object itself, with NO additional text, explanations, or markdown formatting like ```json before or after the JSON object. Ensure all required fields (strategic_recommendations, quick_wins, long_term_strategy, priority_matrix) are present and the `priority_matrix` keys are exactly as shown in the example.
             """
         )
+        recommendations_base_chain = (
+             {
+                 "analysis_results": RunnablePassthrough(),
+                 "format_instructions": lambda _: recommendations_parser.get_format_instructions(),
+             }
+             | recommendations_prompt
+        )
+        if isinstance(self.llm, ChatOllama):
+             logging.info("Using Ollama with_structured_output for recommendations_chain")
+             self.recommendations_chain = recommendations_base_chain | self.llm.with_structured_output(SEORecommendations)
+        else:
+             self.recommendations_chain = recommendations_base_chain | self.llm | recommendations_parser
 
-        self.recommendations_chain = (
+
+        # Store the parser for use in analyze_markdown
+        self.recommendations_parser = recommendations_parser
+
+
+    async def analyze_markdown(self, markdown_content: str) -> Dict:
+        """
+        Performs LLM analysis directly on provided Markdown content to generate SEO recommendations.
+        This is a fallback method and does not perform the full parallel analysis.
+        """
+        logging.info("Running LLM analysis on provided Markdown content (fallback mode).")
+
+        # Simplified prompt for Markdown analysis -> Recommendations
+        markdown_prompt_template = PromptTemplate.from_template(
+            """Analyze the following Markdown content extracted from a webpage and generate SEO recommendations.
+            Focus on identifying potential SEO improvements based *only* on this text content.
+            Consider aspects like keyword usage, topic coverage, clarity, structure, and potential calls-to-action.
+
+            Markdown Content:
+            ```markdown
+            {markdown_content}
+            ```
+
+            {format_instructions}
+
+            Example JSON Output:
+            ```json
+            {{
+              "strategic_recommendations": [
+                "Expand on the 'benefits of X' section with more detail.",
+                "Consider adding a comparison table for product features.",
+                "Target the keyword 'advanced Y techniques' more explicitly."
+              ],
+              "quick_wins": [
+                "Add internal links to related blog posts.",
+                "Clarify the main heading for better focus.",
+                "Include a stronger call-to-action at the end."
+              ],
+              "long_term_strategy": [
+                "Develop a series of articles around the core topic.",
+                "Build out a glossary of technical terms used.",
+                "Create downloadable guides based on the content."
+              ],
+              "priority_matrix": {{
+                "High Impact / Low Effort": ["Clarify main heading", "Add internal links"],
+                "High Impact / High Effort": ["Expand 'benefits of X' section", "Develop article series"],
+                "Low Impact / Low Effort": ["Fix typos"],
+                "Low Impact / High Effort": ["Translate content to Spanish"]
+              }}
+            }}
+            ```
+
+            IMPORTANT: Your response MUST be ONLY the JSON object itself, with NO additional text, explanations, or markdown formatting like ```json before or after the JSON object. Ensure all required fields (strategic_recommendations, quick_wins, long_term_strategy, priority_matrix) are present and the `priority_matrix` keys are exactly as shown in the example.
+            """
+        )
+
+        # Use the existing recommendations_parser or with_structured_output
+        markdown_base_chain = (
             {
-                "analysis_results": RunnablePassthrough(),
-                "format_instructions": lambda _: recommendations_parser.get_format_instructions(),
+                "markdown_content": RunnablePassthrough(),
+                "format_instructions": lambda _: self.recommendations_parser.get_format_instructions(),
             }
-            | recommendations_prompt
-            | self.llm
-            | recommendations_parser
+            | markdown_prompt_template
         )
 
-    async def enhance_seo_analysis(self, seo_data: Dict) -> Dict:
+        if isinstance(self.llm, ChatOllama):
+             logging.info("Using Ollama with_structured_output for analyze_markdown")
+             markdown_chain = markdown_base_chain | self.llm.with_structured_output(SEORecommendations)
+        else:
+             markdown_chain = markdown_base_chain | self.llm | self.recommendations_parser
+
+
+        try:
+            # If using with_structured_output, the result should already be the parsed Pydantic object
+            # If using the parser, the result needs parsing. Langchain might handle this implicitly.
+            # Let's assume ainvoke returns the parsed object in both cases for simplicity now.
+            recommendations = await markdown_chain.ainvoke(markdown_content)
+
+            # Check if the result is already a dict (from model_dump) or needs dumping
+            if isinstance(recommendations, dict):
+                 return recommendations
+            elif hasattr(recommendations, 'model_dump'):
+                 return recommendations.model_dump()
+            else:
+                 # Handle unexpected return type
+                 logging.error(f"Unexpected result type from markdown_chain: {type(recommendations)}")
+                 return {"error": "LLM analysis returned unexpected data type."}
+
+        except Exception as e:
+            logging.error(f"Error during Markdown LLM analysis: {e}", exc_info=True)
+            # Return a dictionary indicating failure
+            return {
+                "strategic_recommendations": [],
+                "quick_wins": [],
+                "long_term_strategy": [],
+                "priority_matrix": {},
+                "error": f"LLM analysis failed: {e}"
+            }
+
+
+    async def enhance_seo_analysis(self, parsed_html_data: Dict) -> Dict: # Ensure async
         """
-        Enhanced SEO analysis using modern LangChain patterns
+        Enhanced SEO analysis using modern LangChain patterns based on parsed HTML data.
         """
-        # Convert seo_data to string for prompt insertion
-        seo_data_str = json.dumps(seo_data, indent=2)
+        # Convert parsed_html_data to string for prompt insertion
+        seo_data_str = json.dumps(parsed_html_data, indent=2)
 
-        # Run analysis chains in parallel
-        entity_results, credibility_results, conversation_results, platform_results = (
-            await asyncio.gather(
-                self.entity_chain.ainvoke(seo_data_str),
-                self.credibility_chain.ainvoke(seo_data_str),
-                self.conversation_chain.ainvoke(seo_data_str),
-                self.platform_chain.ainvoke(seo_data_str),
-            )
-        )
+        logging.info("Running parallel LLM chains for full SEO analysis.")
+        tasks = [
+            self.entity_chain.ainvoke(seo_data_str),
+            self.credibility_chain.ainvoke(seo_data_str),
+            self.conversation_chain.ainvoke(seo_data_str),
+            self.platform_chain.ainvoke(seo_data_str),
+        ]
 
-        # Combine analyses
-        combined_analysis = {
-            "entity_analysis": entity_results.model_dump(),
-            "credibility_analysis": credibility_results.model_dump(),
-            "conversation_analysis": conversation_results.model_dump(),
-            "cross_platform_presence": platform_results.model_dump(),
-        }
-
-        # Generate final recommendations
-        recommendations = await self.recommendations_chain.ainvoke(
-            json.dumps(combined_analysis, indent=2)
-        )
-
-        # Combine all results
+        # Initialize results structure
         final_results = {
-            **seo_data,
-            **combined_analysis,
-            "recommendations": recommendations.model_dump(),
+            "entity_analysis": None,
+            "credibility_analysis": None,
+            "conversation_analysis": None,
+            "cross_platform_presence": None,
+            "recommendations": None,
+            "errors": [] # Store specific errors encountered
+        }
+        valid_analysis_for_recommendations = {}
+        analysis_keys = [
+            "entity_analysis",
+            "credibility_analysis",
+            "conversation_analysis",
+            "cross_platform_presence",
+        ]
+
+        try:
+            # Use return_exceptions=True to capture errors without stopping gather
+            gather_results = await asyncio.gather(*tasks, return_exceptions=True) # Use await
+
+            for key, result in zip(analysis_keys, gather_results):
+                if isinstance(result, Exception):
+                    error_msg = f"Error in chain '{key}': {result}"
+                    logging.error(error_msg)
+                    final_results["errors"].append(error_msg)
+                    final_results[key] = {"error": str(result)} # Store error info for this key
+                elif result:
+                    # Result should be the Pydantic model instance if with_structured_output worked,
+                    # or already parsed if using the parser chain.
+                    if isinstance(result, dict):
+                         final_results[key] = result # Already a dict (e.g., from non-Ollama parser)
+                    elif hasattr(result, 'model_dump'):
+                         final_results[key] = result.model_dump() # Dump Pydantic model
+                    else:
+                         # Handle unexpected successful result type
+                         logging.warning(f"Chain '{key}' returned unexpected type: {type(result)}")
+                         final_results[key] = {"error": f"Chain '{key}' returned unexpected data type."}
+                         final_results["errors"].append(f"Chain '{key}' returned unexpected data type.")
+                         continue # Skip adding to valid_analysis
+
+                    # Add valid results for recommendations input if no error stored
+                    if "error" not in final_results[key]:
+                         valid_analysis_for_recommendations[key] = final_results[key]
+                else:
+                     # Handle case where a chain returns None or empty without exception
+                     final_results[key] = {"error": f"Chain '{key}' returned no data."}
+                     final_results["errors"].append(f"Chain '{key}' returned no data.")
+
+
+            # --- Recommendations Chain ---
+            if valid_analysis_for_recommendations: # Only run if at least one chain succeeded
+                try:
+                    logging.info("Generating final recommendations based on successful analyses.")
+                    # Pass only the successful results to the recommendations prompt
+                    recommendations_input = {"analysis_results": json.dumps(valid_analysis_for_recommendations, indent=2)}
+                    recommendations_result = await self.recommendations_chain.ainvoke(recommendations_input) # Use await
+
+                    # Check result type before dumping
+                    if isinstance(recommendations_result, dict):
+                         final_results["recommendations"] = recommendations_result
+                    elif hasattr(recommendations_result, 'model_dump'):
+                         final_results["recommendations"] = recommendations_result.model_dump()
+                    else:
+                         logging.error(f"Unexpected result type from recommendations_chain: {type(recommendations_result)}")
+                         final_results["recommendations"] = {"error": "Recommendations chain returned unexpected data type."}
+                         final_results["errors"].append("Recommendations chain returned unexpected data type.")
+
+                except Exception as reco_exc:
+                    error_msg = f"Error generating recommendations: {reco_exc}"
+                    logging.error(error_msg, exc_info=True)
+                    final_results["errors"].append(error_msg)
+                    final_results["recommendations"] = {"error": f"Failed to generate recommendations: {reco_exc}"} # Use specific prefix
+            else:
+                 warning_msg = "Skipping recommendations as no analysis chains succeeded."
+                 logging.warning(warning_msg)
+                 final_results["errors"].append(warning_msg)
+                 final_results["recommendations"] = {"error": warning_msg} # Store error info
+
+        except Exception as e:
+            # Catch any unexpected error during gather itself (less likely with return_exceptions=True)
+            critical_error_msg = f"Critical error during enhance_seo_analysis gather: {e}"
+            logging.error(critical_error_msg, exc_info=True)
+            final_results["errors"].append(critical_error_msg)
+            # Ensure basic structure exists even on critical failure, marking all as failed
+            for key in analysis_keys:
+                 final_results.setdefault(key, {"error": "Analysis failed due to critical error"})
+            final_results.setdefault("recommendations", {"error": "Analysis failed due to critical error"})
+
+        # Pass the potentially incomplete/error-containing results to formatting
+        return self._format_output(final_results) # Ensure this return is correctly indented
+
+
+    def _format_output(self, analysis_results: Dict) -> Dict: # Ensure this def is correctly indented at class level
+        """Formats the analysis results, handling potential errors in sub-dictionaries."""
+        # Ensure all code below is correctly indented under this method
+        output = {
+            "summary": {},
+            "detailed_analysis": {},
+            "quick_wins": [],
+            "strategic_recommendations": [],
+            "errors": analysis_results.get("errors", []) # Include overall errors list
         }
 
-        return self._format_output(final_results)
+        # --- Process Detailed Analysis ---
+        analysis_keys = [
+            "entity_analysis", "credibility_analysis",
+            "conversation_analysis", "cross_platform_presence",
+            "recommendations"
+        ]
+        for key in analysis_keys:
+            result_data = analysis_results.get(key)
+            if isinstance(result_data, dict):
+                output["detailed_analysis"][key] = result_data # Include the full dict (with potential 'error' key)
+            else:
+                # Handle cases where a key might be missing entirely (e.g., critical failure)
+                output["detailed_analysis"][key] = {"error": f"Analysis data for '{key}' missing or invalid."}
+                # Add error to main list if not already present via specific chain failure
+                error_msg = f"Analysis data for '{key}' missing or invalid."
+                if error_msg not in output["errors"]:
+                     output["errors"].append(error_msg)
 
-    def _format_output(self, raw_analysis: Dict) -> Dict:
-        """Format analysis results into a clean, structured output"""
-        return {
-            "summary": {
-                "entity_score": raw_analysis["entity_analysis"][
-                    "knowledge_panel_readiness"
-                ],
-                "credibility_score": sum(
-                    raw_analysis["credibility_analysis"]["neeat_scores"].values()
-                )
-                / 6,
-                "conversation_score": raw_analysis["conversation_analysis"][
-                    "engagement_score"
-                ],
-                "platform_score": sum(
-                    raw_analysis["cross_platform_presence"][
-                        "visibility_scores"
-                    ].values()
-                )
-                / len(raw_analysis["cross_platform_presence"]["visibility_scores"]),
-            },
-            "detailed_analysis": raw_analysis,
-            "quick_wins": raw_analysis["recommendations"]["quick_wins"],
-            "strategic_recommendations": raw_analysis["recommendations"][
-                "strategic_recommendations"
-            ],
-        }
+
+        # --- Calculate Scores (Safely) ---
+        entity_data = output["detailed_analysis"].get("entity_analysis", {})
+        cred_data = output["detailed_analysis"].get("credibility_analysis", {})
+        conv_data = output["detailed_analysis"].get("conversation_analysis", {})
+        plat_data = output["detailed_analysis"].get("cross_platform_presence", {})
+        reco_data = output["detailed_analysis"].get("recommendations", {})
+
+        # Use "Error" string if the sub-dict contains an 'error' key
+        output["summary"]["entity_score"] = entity_data.get("knowledge_panel_readiness", "N/A") if "error" not in entity_data else "Error"
+
+        credibility_score = "Error" # Default to Error if sub-dict has error
+        if "error" not in cred_data:
+            neeat_scores = cred_data.get("neeat_scores", {})
+            if isinstance(neeat_scores, dict) and neeat_scores:
+                valid_scores = [v for v in neeat_scores.values() if isinstance(v, (int, float))]
+                if valid_scores:
+                    # Calculate average only if valid_scores is not empty
+                    credibility_score = sum(valid_scores) / len(valid_scores) if valid_scores else "N/A (No valid scores)"
+                else: credibility_score = "N/A (No valid scores)" # Handle case of empty/invalid scores dict
+            else: credibility_score = "N/A" # Handle case where neeat_scores is missing/not dict
+        output["summary"]["credibility_score"] = credibility_score
+
+
+        output["summary"]["conversation_score"] = conv_data.get("engagement_score", "N/A") if "error" not in conv_data else "Error"
+
+        platform_score = "Error" # Default to Error if sub-dict has error
+        if "error" not in plat_data:
+            visibility_scores = plat_data.get("visibility_scores", {})
+            if isinstance(visibility_scores, dict) and visibility_scores:
+                valid_platform_scores = [v for v in visibility_scores.values() if isinstance(v, (int, float))]
+                if valid_platform_scores:
+                    # Calculate average only if valid_platform_scores is not empty
+                    platform_score = sum(valid_platform_scores) / len(valid_platform_scores) if valid_platform_scores else "N/A (No valid scores)"
+                else: platform_score = "N/A (No valid scores)"
+            else: platform_score = "N/A"
+        output["summary"]["platform_score"] = platform_score
+
+        # --- Extract Top-Level Recommendations (Safely) ---
+        if "error" not in reco_data:
+            output["quick_wins"] = reco_data.get("quick_wins", [])
+            output["strategic_recommendations"] = reco_data.get("strategic_recommendations", [])
+        else:
+            # If recommendations failed, populate lists with error message
+            error_msg = f"Error retrieving recommendations: {reco_data.get('error', 'Unknown error')}"
+            output["quick_wins"] = [error_msg]
+            output["strategic_recommendations"] = [error_msg]
+            # The specific error is already in the main errors list from enhance_seo_analysis
+
+
+        return output
 
 
 # Example usage with async support
@@ -483,15 +700,24 @@ async def enhanced_modern_analyze(
     """
     Enhanced analysis incorporating modern SEO principles using LangChain
     """
-    from pyseoanalyzer import analyze
+    # Note: This example function might need adjustment depending on how analyze is called
+    # It assumes 'analyze' returns the standard HTML-based analysis dictionary
+    from pyseoanalyzer.analyzer import analyze # Corrected import path
 
-    # Run original analysis
-    original_results = analyze(site, sitemap, **kwargs)
+    # Run original analysis (assuming standard mode, not fallback)
+    # analyze is now async
+    original_results = await analyze(site, sitemap, run_llm_analysis=False, **kwargs) # Ensure LLM isn't run twice
 
-    # Enhance with modern SEO analysis if API key provided
-    if api_key:
+    # Enhance with modern SEO analysis if API key provided (or other LLM config is set)
+    # We might want to check env vars directly here instead of relying on api_key
+    llm_provider = os.environ.get("LLM_PROVIDER")
+    if llm_provider: # Check if any LLM provider is configured
+        logging.info("LLM provider configured, attempting enhancement.")
         enhancer = LLMSEOEnhancer()
+        # Pass the results from the standard HTML analysis
         enhanced_results = await enhancer.enhance_seo_analysis(original_results)
-        return enhancer._format_output(enhanced_results)
-
-    return original_results
+        # The _format_output is now called within enhance_seo_analysis
+        return enhanced_results
+    else:
+        logging.info("No LLM provider configured, returning original analysis results.")
+        return original_results

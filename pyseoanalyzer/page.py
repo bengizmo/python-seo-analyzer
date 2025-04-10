@@ -171,7 +171,7 @@ class Page:
             if value:
                 self.additional_info.update({tag: value})
 
-    def analyze(self, raw_html=None):
+    async def analyze(self, raw_html=None): # Make method async
         """
         Analyze the page and populate the warnings list
         """
@@ -333,18 +333,20 @@ class Page:
             self.analyze_additional_tags(soup_unmodified)
 
         if self.run_llm_analysis:
-            self.llm_analysis = self.use_llm_analyzer()
+            # Analyze is now async, so we await the LLM call
+            self.llm_analysis = await self.use_llm_analyzer()
 
         return True
 
-    def use_llm_analyzer(self):
+    async def use_llm_analyzer(self): # Make method async
         """
         Use the LLM analyzer to enhance the SEO analysis
         """
 
         llm_enhancer = LLMSEOEnhancer()
-        try: # Add try block around asyncio.run
-            return asyncio.run(llm_enhancer.enhance_seo_analysis(self.content))
+        try:
+            # Replace asyncio.run with await
+            return await llm_enhancer.enhance_seo_analysis(self.content)
         except Exception as llm_exc:
             log_func = getattr(logging, 'error', print)
             log_func(f"Error during LLM analysis for {self.url}: {llm_exc}")

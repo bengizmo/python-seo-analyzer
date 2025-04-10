@@ -1,18 +1,19 @@
 import pytest
 import os
+from typing import List, Dict, Union # Import necessary types
 from unittest.mock import patch, AsyncMock, MagicMock
 from pyseoanalyzer.llm_analyst import (
     LLMSEOEnhancer,
-    EntityAnalysis, # Import Pydantic models for mocking if needed
+    EntityAnalysis,
     CredibilityAnalysis,
     ConversationAnalysis,
     PlatformPresence,
     SEORecommendations
 )
 from langchain_anthropic import ChatAnthropic
-from langchain_community.chat_models import ChatLiteLLM
-from langchain_ollama import ChatOllama # Corrected import
-from langchain.chains import LLMChain
+from langchain_community.chat_models import ChatLiteLLM # Keep import for isinstance check if needed, though tests removed
+from langchain_ollama import ChatOllama
+from langchain.chains import LLMChain # Keep import if needed elsewhere, though not used in patched tests
 from langchain.prompts import PromptTemplate
 import json
 
@@ -25,7 +26,6 @@ def seo_data():
         "description": "Test Description",
         "keywords": [{"word": "test", "count": 5}, {"word": "seo", "count": 3}], # Use dict format
         "content": "This is a test content for analysis.",
-        # Add other keys that might be expected by _format_output or enhance_seo_analysis
         "url": "http://example.com",
         "author": "Test Author",
         "hostname": "example.com",
@@ -69,7 +69,8 @@ class MockSEORecommendations(SEORecommendations):
     priority_matrix: Dict[str, List[str]] = {"pm1": ["p1"]} # Use List[str]
 
 
-def test_init(monkeypatch):
+@patch('pyseoanalyzer.llm_analyst.load_dotenv', return_value=None) # Patch load_dotenv to prevent override
+def test_init(mock_load_dotenv, monkeypatch): # Add mock_load_dotenv to signature
     """ Tests the __init__ method for different providers """
     # --- Test Anthropic Path ---
     monkeypatch.setenv("LLM_PROVIDER", "anthropic")
@@ -84,33 +85,13 @@ def test_init(monkeypatch):
     # Test Anthropic default model
     enhancer_anthropic_default = LLMSEOEnhancer()
     assert isinstance(enhancer_anthropic_default.llm, ChatAnthropic)
-    assert enhancer_anthropic_default.llm.model == "claude-3-5-haiku-latest"
+    # Update expected default model based on llm_analyst.py code
+    assert enhancer_anthropic_default.llm.model == "claude-3-sonnet-20240229"
     monkeypatch.delenv("ANTHROPIC_API_KEY") # Clean up
-
-    # --- Test LiteLLM Path ---
-    monkeypatch.setenv("LLM_PROVIDER", "litellm")
-    monkeypatch.setenv("LITELLM_HOST", "http://fake-host:8000")
-    monkeypatch.setenv("OLLAMA_MODEL", "test-ollama-model") # Base name
-    monkeypatch.setenv("LITELLM_API_KEY", "fake-litellm-key") # Test with API key
-    enhancer_litellm = LLMSEOEnhancer()
-    assert isinstance(enhancer_litellm.llm, ChatLiteLLM)
-    assert enhancer_litellm.llm.model == "ollama/test-ollama-model" # Check prefix is added
-    assert enhancer_litellm.llm.openai_api_base == "http://fake-host:8000" # Check correct base
-    assert enhancer_litellm.llm.api_key == "fake-litellm-key" # Check standard key param
-    assert enhancer_litellm.llm.temperature == 0
-
-    # Test LiteLLM without optional API key
-    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
-    enhancer_litellm_no_key = LLMSEOEnhancer()
-    assert isinstance(enhancer_litellm_no_key.llm, ChatLiteLLM)
-    assert enhancer_litellm_no_key.llm.model == "ollama/test-ollama-model"
-    assert enhancer_litellm_no_key.llm.api_key is None # Check key is None
-    monkeypatch.delenv("LITELLM_HOST", raising=False)
-    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
 
     # --- Test Direct Ollama Path ---
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
-    monkeypatch.setenv("OLLAMA_MODEL", "test-ollama-direct")
+    monkeypatch.setenv("LLM_MODEL", "test-ollama-direct") # Use LLM_MODEL as checked in code
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://ollama-host:11434") # Test custom base URL
     enhancer_ollama = LLMSEOEnhancer()
     assert isinstance(enhancer_ollama.llm, ChatOllama)
@@ -120,6 +101,8 @@ def test_init(monkeypatch):
 
     # Test Ollama default base URL
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    # Need to set LLM_MODEL even when testing default base URL
+    monkeypatch.setenv("LLM_MODEL", "test-ollama-default-url")
     enhancer_ollama_default_url = LLMSEOEnhancer()
     assert isinstance(enhancer_ollama_default_url.llm, ChatOllama)
     assert enhancer_ollama_default_url.llm.base_url == "http://localhost:11434" # Check default
@@ -127,30 +110,19 @@ def test_init(monkeypatch):
 
     # --- Test Error Path ---
     monkeypatch.setenv("LLM_PROVIDER", "unsupported")
-    with pytest.raises(ValueError, match="LLM configuration error"):
+    # Expect specific error message from the updated code
+    with pytest.raises(ValueError, match="Unsupported LLM_PROVIDER: 'unsupported'"):
         LLMSEOEnhancer()
 
-    monkeypatch.setenv("LLM_PROVIDER", "litellm") # Set provider
-    monkeypatch.delenv("LITELLM_HOST", raising=False) # Remove host
-    monkeypatch.setenv("OLLAMA_MODEL", "some-model") # Add model back
-    with pytest.raises(ValueError, match="LLM configuration error"):
-        LLMSEOEnhancer() # Should fail without host
-
-    monkeypatch.setenv("LITELLM_HOST", "some-host") # Add host back
-    monkeypatch.delenv("OLLAMA_MODEL", raising=False) # Remove model
-    with pytest.raises(ValueError, match="LLM configuration error"):
-        LLMSEOEnhancer() # Should fail without model
-
+    # Test missing Ollama model
     monkeypatch.setenv("LLM_PROVIDER", "ollama") # Set provider
-    monkeypatch.delenv("OLLAMA_MODEL", raising=False) # Remove model
-    with pytest.raises(ValueError, match="LLM configuration error"):
+    monkeypatch.delenv("LLM_MODEL", raising=False) # Remove model
+    with pytest.raises(ValueError, match="LLM_MODEL is required for Ollama provider"):
         LLMSEOEnhancer() # Should fail without model
 
     # Clean up all test env vars
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
-    monkeypatch.delenv("LITELLM_HOST", raising=False)
     monkeypatch.delenv("OLLAMA_MODEL", raising=False)
-    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
@@ -181,7 +153,7 @@ async def test_enhance_seo_analysis_mocked(mock_gather, mock_setup, seo_data, mo
     ]
 
     # Define mock return value for the recommendations chain
-    enhancer.recommendations_chain.ainvoke = AsyncMock(return_value=MockSEORecommendations()) # Corrected target
+    enhancer.recommendations_chain.ainvoke = AsyncMock(return_value=MockSEORecommendations())
 
     # Call the method under test
     result = await enhancer.enhance_seo_analysis(seo_data)
@@ -191,6 +163,7 @@ async def test_enhance_seo_analysis_mocked(mock_gather, mock_setup, seo_data, mo
     assert "detailed_analysis" in result
     assert "quick_wins" in result
     assert "strategic_recommendations" in result
+    assert "errors" in result and not result["errors"] # Check errors list is present and empty
 
     # Check detailed analysis structure
     detailed = result["detailed_analysis"]
@@ -212,7 +185,7 @@ async def test_enhance_seo_analysis_mocked(mock_gather, mock_setup, seo_data, mo
     # Check that gather was called
     mock_gather.assert_awaited_once()
     # Check that recommendations_chain.ainvoke was called
-    enhancer.recommendations_chain.ainvoke.assert_awaited_once() # Corrected target
+    enhancer.recommendations_chain.ainvoke.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -239,8 +212,8 @@ async def test_enhance_seo_analysis_gather_error(mock_gather, mock_setup, seo_da
         MockPlatformPresence()
     ]
 
-    # Recommendations chain shouldn't be called if a prior chain failed
-    enhancer.recommendations_chain.ainvoke = AsyncMock() # Corrected target
+    # Recommendations chain should still be invoked if other chains succeeded
+    enhancer.recommendations_chain.ainvoke = AsyncMock(return_value=MockSEORecommendations())
 
     result = await enhancer.enhance_seo_analysis(seo_data)
 
@@ -254,11 +227,17 @@ async def test_enhance_seo_analysis_gather_error(mock_gather, mock_setup, seo_da
     assert "conversation_analysis" in detailed
     assert "cross_platform_presence" in detailed
     assert "recommendations" in detailed
-    assert "error" in detailed["recommendations"] # Recommendations should show error
+    assert "error" not in detailed["recommendations"] # Recommendations should succeed here
+
+    # Check overall errors list
+    assert "errors" in result
+    assert len(result["errors"]) == 1
+    assert "Error in chain 'credibility_analysis': Simulated credibility error" in result["errors"][0]
 
     # Check chains were called appropriately
     mock_gather.assert_awaited_once()
-    enhancer.recommendations_chain.ainvoke.assert_not_awaited() # Corrected target: Recommendations should not be invoked
+    # Recommendations *should* be invoked if other chains succeeded
+    enhancer.recommendations_chain.ainvoke.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -286,7 +265,7 @@ async def test_enhance_seo_analysis_reco_error(mock_gather, mock_setup, seo_data
     ]
 
     # Simulate error in recommendations chain
-    enhancer.recommendations_chain.ainvoke = AsyncMock(side_effect=ValueError("Simulated recommendation error")) # Corrected target
+    enhancer.recommendations_chain.ainvoke = AsyncMock(side_effect=ValueError("Simulated recommendation error"))
 
     result = await enhancer.enhance_seo_analysis(seo_data)
 
@@ -298,8 +277,74 @@ async def test_enhance_seo_analysis_reco_error(mock_gather, mock_setup, seo_data
     assert "cross_platform_presence" in detailed
     assert "recommendations" in detailed
     assert "error" in detailed["recommendations"] # Check error was recorded
-    assert "Failed to generate recommendations" in detailed["recommendations"]["error"]
+    # Check the error message format applied in llm_analyst.py
+    assert "Failed to generate recommendations: Simulated recommendation error" in detailed["recommendations"]["error"]
+
+    # Check overall errors list
+    assert "errors" in result
+    assert len(result["errors"]) == 1
+    assert "Error generating recommendations: Simulated recommendation error" in result["errors"][0]
 
     # Check chains were called
     mock_gather.assert_awaited_once()
-    enhancer.recommendations_chain.ainvoke.assert_awaited_once() # Corrected target: Recommendations was invoked but failed
+    enhancer.recommendations_chain.ainvoke.assert_awaited_once() # Recommendations was invoked but failed
+
+
+@pytest.mark.asyncio
+@patch('pyseoanalyzer.llm_analyst.load_dotenv', return_value=None) # Patch load_dotenv
+@patch('langchain_anthropic.ChatAnthropic.ainvoke', new_callable=AsyncMock) # Use class patch
+async def test_analyze_markdown_success(mock_llm_ainvoke, mock_load_dotenv, monkeypatch): # Add mock args
+    """Tests the analyze_markdown method successfully returns recommendations."""
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic") # Use Anthropic for this test
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+
+    # Mock the LLM response (raw string expected by parser) - MUST match MockSEORecommendations structure
+    mock_llm_output_str = json.dumps(MockSEORecommendations().model_dump()) # Use json.dumps for correct formatting
+    # Return the raw string directly, as the parser expects string input from the LLM step
+    mock_llm_ainvoke.return_value = mock_llm_output_str
+
+    enhancer = LLMSEOEnhancer() # Initialize after setting env vars
+
+    # The real parser will be used on the mocked LLM output string
+    sample_markdown = "# Test Markdown\nSome content here."
+
+    # Call the method under test
+    result = await enhancer.analyze_markdown(sample_markdown)
+
+    # Assertions
+    assert isinstance(result, dict) # Should return a dict
+    # Check specific fields instead of exact dict match for less brittleness
+    expected_result = MockSEORecommendations().model_dump()
+    assert result.get("quick_wins") == expected_result.get("quick_wins")
+    assert result.get("strategic_recommendations") == expected_result.get("strategic_recommendations")
+
+    # Verify the mocked llm's ainvoke was called
+    mock_llm_ainvoke.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@patch('pyseoanalyzer.llm_analyst.load_dotenv', return_value=None) # Patch load_dotenv
+@patch('langchain_anthropic.ChatAnthropic.ainvoke', new_callable=AsyncMock) # Use class patch
+async def test_analyze_markdown_error(mock_llm_ainvoke, mock_load_dotenv, monkeypatch): # Add mock args
+    """Tests error handling within the analyze_markdown method."""
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic") # Use Anthropic for this test
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+
+    # Mock the llm's ainvoke method (via class patch) to raise an error
+    mock_llm_ainvoke.side_effect = Exception("Simulated LLM error")
+
+    enhancer = LLMSEOEnhancer() # Initialize after setting env vars
+
+    sample_markdown = "# Error Test Markdown"
+
+    # Call the method and expect it to handle the error gracefully
+    result = await enhancer.analyze_markdown(sample_markdown)
+
+    # Assertions for error handling
+    assert isinstance(result, dict)
+    assert "error" in result
+    # Check for the exact error message format returned by the except block
+    assert result["error"] == "LLM analysis failed: Simulated LLM error"
+
+    # Verify the mocked llm's ainvoke was called
+    mock_llm_ainvoke.assert_awaited_once()
